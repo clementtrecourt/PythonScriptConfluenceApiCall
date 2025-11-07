@@ -1,60 +1,72 @@
-import requests, sys, os
+import requests, sys, os, argparse
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-# --- Load Environment Variables ---
-load_dotenv() # This line reads the .env file
-
-# --- Configuration ---
-# Get credentials from environment variables; exit if not found
+# --- Charger les variables d'environnement ---
+load_dotenv()
 email = os.getenv("CONFLUENCE_EMAIL")
 api_token = os.getenv("CONFLUENCE_API_TOKEN")
+base_api_url = "https://clementtpro.atlassian.net/wiki/rest/api"
+
+# --- Définir et lire les arguments ---
+parser = argparse.ArgumentParser(description="Mise à jour d'une table dans Confluence via son ID.")
+parser.add_argument("--page-id", required=True, help="ID de la page Confluence à modifier.")
+parser.add_argument("--ref", required=True, help="La référence unique du client à chercher.")
+parser.add_argument("--login", required=True, help="Le nouveau login à insérer/mettre à jour.")
+parser.add_argument("--password", required=True, help="Le nouveau mot de passe à insérer/mettre à jour.")
+args = parser.parse_args()
+
+# --- Vérification des identifiants ---
 if not email or not api_token:
-    sys.exit("Error: Ensure CONFLUENCE_EMAIL and CONFLUENCE_API_TOKEN are set in your .env file.")
-
-page_id = "131284"
-url = f"https://clementtpro.atlassian.net/wiki/rest/api/content/{page_id}"
-
-# --- User Input & Confirmation ---
-name = input("Enter name to update/add: ").strip()
-score = input(f"Enter new score for '{name}': ").strip()
-if 'y' not in input(f"This will update '{name}' with score '{score}'. Continue? (y/n): ").lower():
-    sys.exit("Operation cancelled by user.")
+    sys.exit("ERREUR: CONFLUENCE_EMAIL et CONFLUENCE_API_TOKEN doivent être définis dans le fichier .env")
 
 try:
-    # --- Step 1: GET Current Page Data ---
     auth = (email, api_token)
-    response = requests.get(url, params={"expand": "body.storage,version"}, auth=auth)
+    page_id = args.page_id
+    page_content_url = f"{base_api_url}/content/{page_id}"
+
+    # --- 1. Récupérer le contenu de la page ---
+    response = requests.get(page_content_url, params={"expand": "body.storage,version"}, auth=auth)
     response.raise_for_status()
     data = response.json()
+    
+    # --- 2. Modifier la table (logique inchangée) ---
     soup = BeautifulSoup(data["body"]["storage"]["value"], "html.parser")
-
-    # --- Step 2: Find and Update Table ---
     table = soup.find("table")
-    if not table: raise ValueError("No table found on the page.")
+    if not table: raise ValueError("Aucune table trouvée sur la page.")
+    
     headers = [h.text.strip() for h in table.find("tr").find_all(["th", "td"])]
-    name_idx, score_idx = headers.index("Name"), headers.index("Score")
+    ref_idx, login_idx, password_idx = headers.index("Ref"), headers.index("Login"), headers.index("Password")
 
+    row_found = False
     for row in table.find_all("tr")[1:]:
         cells = row.find_all("td")
-        if len(cells) > name_idx and cells[name_idx].text.strip() == name:
-            cells[score_idx].string = score
+        if len(cells) > ref_idx and cells[ref_idx].text.strip() == args.ref:
+            cells[login_idx].string = args.login
+            cells[password_idx].string = args.password
+            row_found = True
             break
-    else:  # This block runs only if the name was not found in the loop
+    
+    if not row_found:
         new_row_cells = [''] * len(headers)
-        new_row_cells[name_idx], new_row_cells[score_idx] = name, score
+        new_row_cells[ref_idx], new_row_cells[login_idx], new_row_cells[password_idx] = args.ref, args.login, args.password
         new_row_html = f"<tr>{''.join(f'<td>{c}</td>' for c in new_row_cells)}</tr>"
         table.append(BeautifulSoup(new_row_html, "html.parser"))
 
-    # --- Step 3: PUT Updated Page Back to Confluence ---
+    # --- 3. Envoyer le HTML mis à jour ---
     payload = {
         "id": page_id, "type": "page", "title": data["title"],
         "body": {"storage": {"value": str(soup), "representation": "storage"}},
         "version": {"number": data["version"]["number"] + 1}
     }
-    put_response = requests.put(url, json=payload, auth=auth)
+    put_response = requests.put(page_content_url, json=payload, auth=auth)
     put_response.raise_for_status()
-    print(f"Page updated successfully! '{name}' now has score '{score}'.")
+    
+    print(f"SUCCES: La page ID '{page_id}' a été mise à jour pour la Ref '{args.ref}'.")
 
-except (requests.exceptions.RequestException, ValueError, IndexError) as e:
-    sys.exit(f"An error occurred: {e}\nCheck page ID, API token, and table structure.")
+except (ValueError, IndexError) as e:
+    sys.exit(f"ERREUR de structure: {e}. Vérifiez que la table contient les colonnes 'Ref', 'Login', et 'Password'.")
+except requests.exceptions.RequestException as e:
+    sys.exit(f"ERREUR de requête: {e.response.status_code} - {e.response.text}")
+except Exception as e:
+    sys.exit(f"ERREUR inattendue: {e}")
